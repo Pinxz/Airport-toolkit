@@ -7,6 +7,7 @@ Author: M1Screw
 Github: https://github.com/M1Screw/Airport-toolkit
 Usage: 
 ./b2_backup.sh init --> First time setup for this script
+./b2_backup.sh upgrade --> Upgrade b2 cli
 ./b2_backup.sh backup config1 config2 --> Backup your website & database to B2 Cloud Storage
 EOF
 
@@ -67,6 +68,10 @@ do_init(){
     fi
 }
 
+do_upgrade(){
+    pip3 install --upgrade b2
+}
+
 do_reset_config(){
     unset backup_name b2_app_key_id b2_app_key b2_bucket_name db_name db_password db_user db_host website_dir compress_method
 }
@@ -115,6 +120,11 @@ if [[ $1 == "init" ]]; then
     do_check_os
     do_check_arch
     do_init
+    exit 0
+fi
+
+if [[ $1 == "upgrade" ]]; then
+    do_upgrade
     exit 0
 fi
 
