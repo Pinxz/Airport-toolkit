@@ -2,7 +2,7 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 cat << "EOF"
-B2 Cloud Storage Backup script for RHEL 8+
+B2 Cloud Storage Backup script for RHEL 8+/Ubuntu 20.04+/Debian 10+
 Author: M1Screw
 Github: https://github.com/M1Screw/Airport-toolkit
 Usage: 
@@ -12,11 +12,59 @@ EOF
 
 [ $(id -u) != "0" ] && { echo "Error: You must be root to run this script!"; exit 1; }
 
+do_check_os(){
+    if [[ -f /etc/redhat-release ]]; then
+        os_name="rhel"
+    elif [[ -f /etc/lsb-release ]]; then
+        os_name="ubuntu"
+    elif [[ -f /etc/debian_version ]]; then
+        os_name="debian"
+    else
+        echo -n "Unknown OS"
+        exit 1
+    fi
+}
+
+do_check_arch(){
+    arch=$(arch)
+
+    if [[ $arch == "x86_64" || $arch == "x64" || $arch == "amd64" ]]; then
+        arch="x64"
+    elif [[ $arch == "aarch64" || $arch == "arm64" ]]; then
+        arch="arm64"
+    else
+        echo -n "Unknown arch"
+        exit 1
+    fi
+}
+
+
 do_init(){
-    dnf update -y
-    dnf install gzip zip tar -y
-    dnf install python3-pip -y
+    if [[ ${os_name} == "rhel" ]]; then
+        dnf update -y
+        dnf install xz zip -y
+        dnf install python3-pip -y
+    elif [[ ${os_name} == "ubuntu" || ${os_name} == "debian" ]]; then
+        apt update -y
+        apt install xz-utils zip -y
+        apt install python3-pip -y
+    fi
+
     pip3 install b2
+
+    if [[ ${arch} == "x64" ]]; then
+        mkdir 7z
+        wget https://www.7-zip.org/a/7z2301-linux-x64.tar.xz
+        tar -xf 7z2301-linux-x64.tar.xz -C 7z
+        mv 7z/7zzs /usr/bin/7z
+        rm -r 7z2301-linux-x64.tar.xz 7z
+    elif [[ ${arch} == "arm64" ]]; then
+        mkdir 7z
+        wget https://www.7-zip.org/a/7z2301-linux-arm64.tar.xz
+        tar -xf 7z2301-linux-arm64.tar.xz -C 7z
+        mv 7z/7zzs /usr/bin/7z
+        rm -r 7z2301-linux-arm64.tar.xz 7z
+    fi
 }
 
 do_reset_config(){
@@ -24,11 +72,11 @@ do_reset_config(){
 }
 
 do_pack_db(){
-    if [[ ${compress_method} == "gzip" ]]; then
+    if [[ ${compress_method} == "7z" ]]; then
         db_file_sql="$(date +'%Y-%m-%d-%H-%M-%S')-$backup_name.sql"
-        db_file_name="$(date +'%Y-%m-%d-%H-%M-%S')-$backup_name-db.gz"
+        db_file_name="$(date +'%Y-%m-%d-%H-%M-%S')-$backup_name-db.7z"
         mariadb-dump -u $db_user -p$db_password -h $db_host $db_name > $db_file_sql
-        gzip -c $db_file_sql > $db_file_name
+        7z a -mx9 $db_file_name $db_file_sql
         rm $db_file_sql
     elif [[ ${compress_method} == "zip" ]]; then
         db_file_sql="$(date +'%Y-%m-%d-%H-%M-%S')-$backup_name.sql"
@@ -43,9 +91,9 @@ do_pack_db(){
 }
 
 do_pack_website(){
-    if [[ ${compress_method} == "gzip" ]]; then
-        website_file_name=$(date +'%Y-%m-%d-%H-%M-%S')-$backup_name-web.tar.gz
-        tar -czf $website_file_name $website_dir
+    if [[ ${compress_method} == "7z" ]]; then
+        website_file_name=$(date +'%Y-%m-%d-%H-%M-%S')-$backup_name-web.7z
+        7z a -mx9 $website_file_name $website_dir
     elif [[ ${compress_method} == "zip" ]]; then
         website_file_name=$(date +'%Y-%m-%d-%H-%M-%S')-$backup_name-web.zip
         zip -rqq $website_file_name $website_dir
@@ -64,6 +112,8 @@ do_upload_b2(){
 }
 
 if [[ $1 == "init" ]]; then
+    do_check_os
+    do_check_arch
     do_init
     exit 0
 fi
