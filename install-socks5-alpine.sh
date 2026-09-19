@@ -1,7 +1,8 @@
 #!/bin/sh
 # Dante SOCKS5 installer for Alpine Linux 3.21 / 3.22 / 3.23 (OpenRC).
 # IPv4, username/password authentication, TCP CONNECT + UDP ASSOCIATE.
-# First-install only: existing accounts and service configurations are preserved.
+# Existing service configurations are preserved. --reuse-user allows recovery
+# with a dedicated account left by an earlier failed installation.
 # No firewall changes, remote scripts, edge repositories or system upgrades.
 # Docs: https://www.inet.no/dante/doc/1.4.x/sockd.conf.5.html
 
@@ -23,13 +24,15 @@ S5_SERVICE=/etc/init.d/socks5-dante
 S5_WORK=
 S5_LOCKED=0
 S5_TTY=
+S5_REUSE_USER=0
+S5_KEEP_WORK=0
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
 cleanup() {
     if [ -n "$S5_TTY" ]; then stty "$S5_TTY" 2>/dev/null || :; fi
-    if [ -n "$S5_WORK" ]; then
-        rm -f "$S5_WORK/sockd.conf" "$S5_WORK/service" "$S5_WORK/repositories"
+    if [ -n "$S5_WORK" ] && [ "$S5_KEEP_WORK" = 0 ]; then
+        rm -f "$S5_WORK/sockd.conf" "$S5_WORK/validate.conf" "$S5_WORK/service" "$S5_WORK/repositories"
         rmdir "$S5_WORK" 2>/dev/null || :
     fi
     if [ "$S5_LOCKED" = 1 ]; then rmdir /run/socks5-dante-install.lock 2>/dev/null || :; fi
@@ -48,12 +51,17 @@ Interactive:
 Recommended (password prompted, hidden):
   sh install-socks5-alpine.sh --port 1080 --user socksuser --allow 203.0.113.10/32
 
+Recover after failed configuration validation (keeps the existing password):
+  sh install-socks5-alpine.sh --user socksproxy --reuse-user
+
 Noninteractive (password is exposed in shell history / process arguments):
   sh install-socks5-alpine.sh --port 1080 --user socksuser --password 'STRONG_PASSWORD' --allow 203.0.113.10/32
 
 Options:
   --port N             TCP control port, 1-65535 (interactive default: 1080)
   --user NAME          NEW dedicated local account (default: socksuser)
+  --reuse-user         Reuse this installer's existing non-login account;
+                       preserve its password; cannot combine with --password
   --password TEXT      Password, 12-255 bytes; otherwise prompted twice
   --allow IPv4/CIDR    Client source address/range; /32 is added for a bare IP
   --allow-any          Explicitly allow all IPv4 sources (NOT recommended)
@@ -91,6 +99,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
         --allow-any) S5_ALLOW=0.0.0.0/0; shift ;;
+        --reuse-user) S5_REUSE_USER=1; shift ;;
         --port|--user|--password|--allow|--listen|--interface|--udp-range)
             [ "$#" -ge 2 ] || die "Missing value for $1"
             case "$1" in
@@ -106,6 +115,10 @@ while [ "$#" -gt 0 ]; do
         *) die "Unknown option: $1 (use --help)" ;;
     esac
 done
+
+if [ "$S5_REUSE_USER" = 1 ] && [ -n "$S5_PASS" ]; then
+    die '--reuse-user preserves the current password; do not supply --password.'
+fi
 
 # Accept canonical decimal values only; reject configuration injection.
 valid_port() {
@@ -171,8 +184,17 @@ S5_LOCKED=1
 [ ! -e "$S5_DIR" ] && [ ! -L "$S5_DIR" ] || die "$S5_DIR exists; refusing to overwrite. Inspect it before reinstalling."
 [ ! -e "$S5_SERVICE" ] && [ ! -L "$S5_SERVICE" ] || die "$S5_SERVICE exists; refusing to overwrite."
 [ ! -e /etc/conf.d/socks5-dante ] && [ ! -L /etc/conf.d/socks5-dante ] || die '/etc/conf.d/socks5-dante exists; inspect it first.'
-if id "$S5_USER" >/dev/null 2>&1; then die "Account $S5_USER already exists. Choose a NEW username; existing passwords will not be changed."; fi
+if [ "$S5_REUSE_USER" = 1 ]; then
+    id "$S5_USER" >/dev/null 2>&1 || die "Account $S5_USER does not exist; omit --reuse-user for a new installation."
+    awk -F: -v name="$S5_USER" '
+        $1==name && $3>0 && $5=="Dedicated SOCKS5 proxy account" && $7=="/sbin/nologin" {found=1}
+        END {exit !found}' /etc/passwd || die 'Refusing to reuse an account not matching this installer dedicated-account profile.'
+    info "Reusing account $S5_USER; existing password will NOT be changed."
+elif id "$S5_USER" >/dev/null 2>&1; then
+    die "Account $S5_USER already exists. For an earlier failed install, explicitly use --reuse-user."
+fi
 
+if [ "$S5_REUSE_USER" = 0 ]; then
 if [ -z "$S5_PASS" ]; then
     [ -t 0 ] || die 'Use an interactive terminal for the password, or specify --password.'
     S5_TTY=$(stty -g)
@@ -189,6 +211,7 @@ fi
 [ "${#S5_PASS}" -ge 12 ] && [ "${#S5_PASS}" -le 255 ] || die 'Password must be 12-255 bytes.'
 case "$S5_PASS" in *'
 '*|*"$(printf '\r')"*) die 'Password must not contain CR/LF.' ;; esac
+fi
 
 S5_WORK=$(mktemp -d /etc/socks5-install.XXXXXX)
 S5_REPO_CHANGED=0
@@ -243,19 +266,22 @@ if ss -H -lnu | awk -v lo="$S5_UDP_MIN" -v hi="$S5_UDP_MAX" '{n=split($4,a,":");
 fi
 
 # No shell expansion/eval of passwords; they never enter sockd.conf.
+if [ "$S5_REUSE_USER" = 0 ]; then
 adduser -D -H -s /sbin/nologin -g 'Dedicated SOCKS5 proxy account' "$S5_USER"
 if ! printf '%s:%s\n' "$S5_USER" "$S5_PASS" | chpasswd; then
     die "Password setup failed. Account $S5_USER was created; inspect it before retrying."
+fi
 fi
 unset S5_PASS
 
 cat > "$S5_WORK/sockd.conf" <<EOF
 # Managed by install-socks5-alpine.sh; IPv4-only SOCKS5.
 logoutput: /var/log/socks5-dante.log
-internal: $S5_LISTEN port = $S5_PORT
-external: $S5_INTERFACE
+# Dante 1.4.3 requires protocol declarations BEFORE interface addresses.
 internal.protocol: ipv4
 external.protocol: ipv4
+internal: $S5_LISTEN port = $S5_PORT
+external: $S5_INTERFACE
 user.privileged: root
 user.unprivileged: nobody
 clientmethod: none
@@ -285,9 +311,14 @@ socks pass {
 }
 EOF
 
-# Check the actual installed Dante parser, not assumptions about package splits.
-if ! /usr/sbin/sockd -V -f "$S5_WORK/sockd.conf"; then
-    die "Dante rejected the configuration. No service was enabled; account $S5_USER remains."
+# Use the same config with stderr logging so parser errors are immediately visible.
+sed 's|^logoutput: /var/log/socks5-dante.log$|logoutput: stderr|' \
+    "$S5_WORK/sockd.conf" > "$S5_WORK/validate.conf"
+if ! /usr/sbin/sockd -V -f "$S5_WORK/validate.conf"; then
+    S5_KEEP_WORK=1
+    info "Failed config retained in $S5_WORK (root-only)."
+    info "Recheck: /usr/sbin/sockd -V -f $S5_WORK/validate.conf"
+    die "Dante rejected the configuration. No service was enabled; account $S5_USER remains. Use --reuse-user when retrying."
 fi
 cat > "$S5_WORK/service" <<'OPENRC'
 #!/sbin/openrc-run
